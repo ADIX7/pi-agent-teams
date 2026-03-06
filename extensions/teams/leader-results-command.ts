@@ -1,45 +1,87 @@
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { completeSimple, getModels } from "@mariozechner/pi-ai";
+import type { AssistantMessage, TextContent, KnownProvider, Model, Api } from "@mariozechner/pi-ai";
 import type { TeamTask } from "./task-store.js";
 
-function parseLimit(args: string[], fallback: number): { limit: number; rest: string[]; error?: string } {
-	let limit = fallback;
-	const out: string[] = [];
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i] ?? "";
+type Scope = "completed" | "all";
+
+type ParsedOptions = {
+	scope: Scope;
+	limit: number;
+	ids: Set<string> | null;
+	summary: boolean;
+	model: { provider: string; id: string };
+};
+
+const DEFAULT_LIMIT = 50;
+const DEFAULT_SUMMARY_MODEL = { provider: "github-copilot", id: "claude-haiku-4.5" };
+
+function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: false; error: string } {
+	let scope: Scope = "completed";
+	let limit = DEFAULT_LIMIT;
+	let ids: Set<string> | null = null;
+	let summary = false;
+	let model = { ...DEFAULT_SUMMARY_MODEL };
+
+	const positionals: string[] = [];
+
+	for (let i = 0; i < rest.length; i++) {
+		const a = (rest[i] ?? "").trim();
+		if (!a) continue;
+
 		if (a === "--limit") {
-			const nRaw = args[i + 1];
-			if (!nRaw) return { limit, rest: out, error: "Missing value for --limit" };
-			const n = Number.parseInt(nRaw, 10);
-			if (!Number.isFinite(n) || n <= 0) return { limit, rest: out, error: `Invalid --limit: ${nRaw}` };
+			const v = rest[i + 1];
+			if (!v) return { ok: false, error: "Missing value for --limit" };
+			const n = Number.parseInt(v, 10);
+			if (!Number.isFinite(n) || n <= 0) return { ok: false, error: `Invalid --limit: ${v}` };
 			limit = n;
 			i += 1;
 			continue;
 		}
-		out.push(a);
-	}
-	return { limit, rest: out };
-}
 
-function parseIds(args: string[]): { ids: Set<string> | null; rest: string[]; error?: string } {
-	const out: string[] = [];
-	let ids: Set<string> | null = null;
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i] ?? "";
 		if (a === "--ids") {
-			const v = args[i + 1];
-			if (!v) return { ids: null, rest: out, error: "Missing value for --ids" };
+			const v = rest[i + 1];
+			if (!v) return { ok: false, error: "Missing value for --ids" };
 			const parts = v
 				.split(",")
 				.map((s) => s.trim())
 				.filter((s) => s.length > 0);
-			if (!parts.length) return { ids: null, rest: out, error: `Invalid --ids: ${v}` };
+			if (!parts.length) return { ok: false, error: `Invalid --ids: ${v}` };
 			ids = new Set(parts);
 			i += 1;
 			continue;
 		}
-		out.push(a);
+
+		if (a === "--summary") {
+			summary = true;
+			continue;
+		}
+
+		if (a === "--model") {
+			const v = rest[i + 1];
+			if (!v) return { ok: false, error: "Missing value for --model" };
+			const [p, ...idParts] = v.split("/");
+			const id = idParts.join("/");
+			if (!p || !id) return { ok: false, error: `Invalid --model: ${v} (expected <provider>/<modelId>)` };
+			model = { provider: p, id };
+			i += 1;
+			continue;
+		}
+
+		if (a.startsWith("--")) return { ok: false, error: `Unknown option: ${a}` };
+		positionals.push(a);
 	}
-	return { ids, rest: out };
+
+	if (positionals.length > 1) {
+		return { ok: false, error: "Too many positional args" };
+	}
+	if (positionals.length === 1) {
+		const s = positionals[0] ?? "";
+		if (s === "completed" || s === "all") scope = s;
+		else return { ok: false, error: `Invalid scope: ${s}` };
+	}
+
+	return { ok: true, opts: { scope, limit, ids, summary, model } };
 }
 
 function taskHasResult(t: TeamTask): boolean {
@@ -51,6 +93,122 @@ function byNumericIdAsc(a: TeamTask, b: TeamTask): number {
 	const nb = Number.parseInt(b.id, 10);
 	if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
 	return a.id.localeCompare(b.id, undefined, { numeric: true });
+}
+
+function assistantText(msg: AssistantMessage): string {
+	return (msg.content ?? [])
+		.filter((c): c is TextContent => c.type === "text")
+		.map((c) => c.text)
+		.join("");
+}
+
+const KNOWN_PROVIDERS: KnownProvider[] = [
+	"amazon-bedrock",
+	"anthropic",
+	"google",
+	"google-gemini-cli",
+	"google-antigravity",
+	"google-vertex",
+	"openai",
+	"azure-openai-responses",
+	"openai-codex",
+	"github-copilot",
+	"xai",
+	"groq",
+	"cerebras",
+	"openrouter",
+	"vercel-ai-gateway",
+	"zai",
+	"mistral",
+	"minimax",
+	"minimax-cn",
+	"huggingface",
+	"opencode",
+	"kimi-coding",
+];
+
+function isKnownProvider(v: string): v is KnownProvider {
+	return (KNOWN_PROVIDERS as readonly string[]).includes(v);
+}
+
+function resolveModel(spec: { provider: string; id: string }): Model<Api> | null {
+	if (!isKnownProvider(spec.provider)) return null;
+	const ms = getModels(spec.provider);
+	return (ms.find((m) => m.id === spec.id) as Model<Api> | undefined) ?? null;
+}
+
+async function summarizeResults(opts: {
+	ctx: ExtensionCommandContext;
+	tasks: TeamTask[];
+	model: { provider: string; id: string };
+}): Promise<Map<string, string> | null> {
+	const { ctx, tasks, model } = opts;
+
+	const m = resolveModel(model);
+	if (!m) {
+		ctx.ui.notify(`Unknown model: ${model.provider}/${model.id}`, "error");
+		return null;
+	}
+
+	const input = tasks.map((t) => ({
+		id: t.id,
+		subject: t.subject,
+		result: String(t.metadata?.result ?? ""),
+	}));
+
+	const systemPrompt =
+		"You summarize task results. For each task, produce a 1-3 line summary. " +
+		"You MUST return valid JSON only (no markdown), exactly one entry per input task id. " +
+		"Output: an array of objects: {\"id\": string, \"summary\": string}.";
+
+	let msg: AssistantMessage;
+	try {
+		msg = await completeSimple(
+			m,
+			{
+				systemPrompt,
+				messages: [
+					{ role: "user", content: JSON.stringify(input), timestamp: Date.now() },
+				],
+			},
+			{ maxTokens: 2000, temperature: 0.2 },
+		);
+	} catch (e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
+		ctx.ui.notify(`Summarization failed: ${msg}`, "error");
+		return null;
+	}
+
+	const raw = assistantText(msg).trim();
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw) as unknown;
+	} catch {
+		ctx.ui.notify(`Summarization returned non-JSON. Showing full results.`, "error");
+		return null;
+	}
+
+	if (!Array.isArray(parsed)) {
+		ctx.ui.notify(`Summarization returned invalid JSON shape. Showing full results.`, "error");
+		return null;
+	}
+
+	const out = new Map<string, string>();
+	for (const item of parsed as unknown[]) {
+		if (!item || typeof item !== "object") continue;
+		const maybe = item as { id?: unknown; summary?: unknown };
+		if (typeof maybe.id !== "string" || typeof maybe.summary !== "string") continue;
+		out.set(maybe.id, maybe.summary.trim());
+	}
+
+	// ensure coverage
+	const missing = tasks.filter((t) => !out.has(t.id)).map((t) => t.id);
+	if (missing.length) {
+		ctx.ui.notify(`Summarization missing ids: ${missing.join(", ")}. Showing full results.`, "error");
+		return null;
+	}
+
+	return out;
 }
 
 export async function handleTeamResultsCommand(opts: {
@@ -65,28 +223,13 @@ export async function handleTeamResultsCommand(opts: {
 
 	const effectiveTlId = getTaskListId() ?? teamId;
 
-	const parsedLimit = parseLimit(rest, 50);
-	if (parsedLimit.error) {
-		ctx.ui.notify(`Usage: /team results [completed|all] [--limit N] [--ids 1,2,3]\n${parsedLimit.error}`, "error");
-		return;
-	}
-
-	const parsedIds = parseIds(parsedLimit.rest);
-	if (parsedIds.error) {
-		ctx.ui.notify(`Usage: /team results [completed|all] [--limit N] [--ids 1,2,3]\n${parsedIds.error}`, "error");
-		return;
-	}
-
-	const argsOnly = parsedIds.rest.filter((a) => !a.startsWith("--"));
-	if (argsOnly.length > 1) {
-		ctx.ui.notify("Usage: /team results [completed|all] [--limit N] [--ids 1,2,3]", "error");
-		return;
-	}
-
-	const scopeRaw = (argsOnly[0] ?? "completed").trim();
-	const scope = scopeRaw === "all" ? "all" : scopeRaw === "completed" ? "completed" : null;
-	if (!scope) {
-		ctx.ui.notify("Usage: /team results [completed|all] [--limit N] [--ids 1,2,3]", "error");
+	const parsed = parseArgs(rest);
+	if (!parsed.ok) {
+		ctx.ui.notify(
+			"Usage: /team results [completed|all] [--limit N] [--ids 1,2,3] [--summary] [--model <provider>/<modelId>]\n" +
+				parsed.error,
+			"error",
+		);
 		return;
 	}
 
@@ -94,32 +237,48 @@ export async function handleTeamResultsCommand(opts: {
 	const tasks = getTasks();
 
 	let selected = tasks.filter((t) => taskHasResult(t));
-	if (scope === "completed") selected = selected.filter((t) => t.status === "completed");
-	if (parsedIds.ids) {
-		const ids = parsedIds.ids;
+	if (parsed.opts.scope === "completed") selected = selected.filter((t) => t.status === "completed");
+	if (parsed.opts.ids) {
+		const ids = parsed.opts.ids;
 		selected = selected.filter((t) => ids.has(t.id));
 	}
 
 	selected.sort(byNumericIdAsc);
 
 	// default: last N (unless --ids used)
-	const limit = parsedIds.ids ? null : parsedLimit.limit;
+	const limit = parsed.opts.ids ? null : parsed.opts.limit;
 	if (limit !== null && selected.length > limit) selected = selected.slice(-limit);
 
 	if (!selected.length) {
-		ctx.ui.notify(`No task results (scope=${scope} taskListId=${effectiveTlId})`, "info");
+		ctx.ui.notify(`No task results (scope=${parsed.opts.scope} taskListId=${effectiveTlId})`, "info");
 		return;
 	}
 
+	let summaries: Map<string, string> | null = null;
+	if (parsed.opts.summary) {
+		summaries = await summarizeResults({ ctx, tasks: selected, model: parsed.opts.model });
+	}
+
 	const blocks: string[] = [];
-	blocks.push(`Results (${selected.length}) — scope=${scope} — taskListId=${effectiveTlId}`);
+	blocks.push(
+		`Results (${selected.length}) — scope=${parsed.opts.scope} — taskListId=${effectiveTlId}` +
+			(parsed.opts.summary ? ` — summaryModel=${parsed.opts.model.provider}/${parsed.opts.model.id}` : ""),
+	);
 	blocks.push("");
+
 	for (const t of selected) {
 		blocks.push(`#${t.id} ${t.subject}`);
 		blocks.push(`status: ${t.status}${t.owner ? ` • owner: ${t.owner}` : ""}`);
 		blocks.push("");
-		blocks.push("result:");
-		blocks.push(String(t.metadata?.result ?? "").trimEnd());
+
+		if (summaries) {
+			blocks.push("summary:");
+			blocks.push(String(summaries.get(t.id) ?? "").trimEnd());
+		} else {
+			blocks.push("result:");
+			blocks.push(String(t.metadata?.result ?? "").trimEnd());
+		}
+
 		blocks.push("");
 		blocks.push("---");
 		blocks.push("");
