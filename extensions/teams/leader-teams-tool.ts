@@ -34,8 +34,9 @@ import {
 } from "./task-store.js";
 import type { TeammateRpc } from "./teammate-rpc.js";
 import type { ContextMode, WorkspaceMode, SpawnTeammateFn } from "./spawn-types.js";
+import { discoverTeamAgents } from "./agent-discovery.js";
 
-type TeamsToolDelegateTask = { text: string; assignee?: string };
+type TeamsToolDelegateTask = { text: string; assignee?: string; agent?: string };
 
 function describeModelSource(source: TeammateModelSource): string {
 	if (source === "override") return "override";
@@ -65,6 +66,7 @@ const TeamsActionSchema = StringEnum(
 		"hooks_policy_set",
 		"model_policy_get",
 		"model_policy_check",
+		"agent_list",
 	] as const,
 	{
 		description: "Teams tool action.",
@@ -102,6 +104,7 @@ const TeamsHookFollowupOwnerSchema = StringEnum(["member", "lead", "none"] as co
 const TeamsDelegateTaskSchema = Type.Object({
 	text: Type.String({ description: "Task / TODO text." }),
 	assignee: Type.Optional(Type.String({ description: "Optional comrade name. If omitted, assigned round-robin." })),
+	agent: Type.Optional(Type.String({ description: "Optional agent profile name (from ~/.pi/agent/agents or <repo>/.pi/agents)." })),
 });
 
 const TeamsToolParamsSchema = Type.Object({
@@ -117,6 +120,7 @@ const TeamsToolParamsSchema = Type.Object({
 	feedback: Type.Optional(Type.String({ description: "Feedback for action=plan_reject." })),
 	all: Type.Optional(Type.Boolean({ description: "For member_shutdown/member_prune, apply to all workers." })),
 	planRequired: Type.Optional(Type.Boolean({ description: "For member_spawn, start worker in plan-required mode." })),
+	agent: Type.Optional(Type.String({ description: "For member_spawn, agent profile name (from ~/.pi/agent/agents or <repo>/.pi/agents)." })),
 	teammates: Type.Optional(
 		Type.Array(Type.String(), {
 			description: "Explicit comrade names to use/spawn. If omitted, uses existing or auto-generates.",
@@ -459,6 +463,19 @@ export function registerTeamsTool(opts: {
 				};
 			}
 
+			if (action === "agent_list") {
+				const res = await discoverTeamAgents(ctx);
+				const listed = res.agents
+					.map((a) => `${a.name} (${a.source}): ${a.description}`)
+					.join("\n");
+				const text = [
+					`Agents (${res.agents.length}):`,
+					listed || "(none)",
+					...(res.warnings.length ? ["", "Warnings:", ...res.warnings.map((w) => `- ${w}`)] : []),
+				].join("\n");
+				return { content: [{ type: "text", text }], details: { action, count: res.agents.length, warnings: res.warnings } };
+			}
+
 			if (action === "member_spawn") {
 				const nameRaw = params.name?.trim();
 				const name = sanitizeName(nameRaw ?? "");
@@ -479,10 +496,12 @@ export function registerTeamsTool(opts: {
 				const workspaceMode: WorkspaceMode = params.workspaceMode === "worktree" ? "worktree" : "shared";
 				const modelOverride = params.model?.trim();
 				const spawnModel = modelOverride && modelOverride.length > 0 ? modelOverride : undefined;
+				const spawnAgent = params.agent?.trim() || undefined;
 				const res = await spawnTeammate(ctx, {
 					name,
 					mode: contextMode,
 					workspaceMode,
+					agent: spawnAgent,
 					model: spawnModel,
 					thinking: params.thinking,
 					planRequired: params.planRequired === true,
@@ -503,7 +522,7 @@ export function registerTeamsTool(opts: {
 				for (const w of res.warnings) lines.push(`warning: ${w}`);
 				return {
 					content: [{ type: "text", text: lines.join("\n") }],
-					details: { action, teamId, name: res.name, mode: res.mode, workspaceMode: res.workspaceMode, warnings: res.warnings },
+					details: { action, teamId, name: res.name, mode: res.mode, workspaceMode: res.workspaceMode, agent: spawnAgent, warnings: res.warnings },
 				};
 			}
 
@@ -1002,11 +1021,36 @@ export function registerTeamsTool(opts: {
 					continue;
 				}
 
+				const taskAgent = t.agent?.trim() || undefined;
 				const explicitAssignee = t.assignee ? sanitizeName(t.assignee) : undefined;
-				const assignee = explicitAssignee ?? teammateNames[rr++ % teammateNames.length];
+
+				const assignee = (() => {
+					if (explicitAssignee) return explicitAssignee;
+					if (!taskAgent) return teammateNames[rr++ % teammateNames.length];
+
+					// If task asks for a specific agent profile but didn't specify an assignee, spawn a fresh teammate for it.
+					const naming = getTeamsNamingRules(style);
+					if (naming.requireExplicitSpawnName) return undefined;
+					const taken = new Set<string>([...teammates.keys(), ...teammateNames, ...spawned]);
+					const picked =
+						naming.autoNameStrategy.kind === "agent"
+							? pickAgentNames(1, taken).at(0)
+							: pickNamesFromPool({
+								pool: naming.autoNameStrategy.pool,
+								count: 1,
+								taken,
+								fallbackBase: naming.autoNameStrategy.fallbackBase,
+							}).at(0);
+					if (picked) teammateNames.push(picked);
+					return picked;
+				})();
+
 				if (!assignee) {
-					warnings.push(`No assignee available for task: ${text.slice(0, 60)}`);
+					warnings.push(`No assignee available for task: ${text.slice(0, 60)}${taskAgent ? ` (agent=${taskAgent})` : ""}`);
 					continue;
+				}
+				if (taskAgent && teammates.has(assignee)) {
+					warnings.push(`Task requested agent '${taskAgent}' but assignee '${assignee}' is already running`);
 				}
 
 				if (!teammates.has(assignee)) {
@@ -1014,6 +1058,7 @@ export function registerTeamsTool(opts: {
 						name: assignee,
 						mode: contextMode,
 						workspaceMode: requestedWorkspaceMode,
+						agent: taskAgent,
 						model: spawnModel,
 						thinking: spawnThinking,
 					});

@@ -187,7 +187,7 @@ All management commands live under `/team`.
 
 | Command | Description |
 | --- | --- |
-| `/team spawn <name> [fresh\|branch] [shared\|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]` | Start a teammate |
+| `/team spawn <name> [fresh\|branch] [shared\|worktree] [plan] [--agent <agent>] [--model <provider>/<modelId>] [--thinking <level>]` | Start a teammate |
 | `/team list` | List teammates and their status |
 | `/team panel` | Interactive widget panel (same as `/tw`) |
 | `/team attach list` | Discover existing team workspaces under `<teamsRoot>` |

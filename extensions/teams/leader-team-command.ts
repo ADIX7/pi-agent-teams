@@ -37,7 +37,7 @@ const TEAM_HELP_TEXT = [
 	"  /team attach list",
 	"  /team attach <teamId> [--claim]",
 	"  /team detach",
-	"  /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]",
+	"  /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--agent <agent>] [--model <provider>/<modelId>] [--thinking <level>]", 
 	"  /team panel",
 	"  /team send <name> <msg...>",
 	"  /team dm <name> <msg...>",

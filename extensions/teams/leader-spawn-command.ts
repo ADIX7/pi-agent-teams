@@ -35,6 +35,7 @@ export async function handleTeamSpawnCommand(opts: {
 	let mode: ContextMode = "fresh";
 	let workspaceMode: WorkspaceMode = "shared";
 	let planRequired = false;
+	let agent: string | undefined;
 	let model: string | undefined;
 	let thinking: ThinkingLevel | undefined;
 
@@ -55,10 +56,31 @@ export async function handleTeamSpawnCommand(opts: {
 			continue;
 		}
 
+		if (a === "--agent") {
+			const next = rest[i + 1];
+			if (!next) {
+				ctx.ui.notify(
+					"Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--agent <agent>] [--model <provider>/<modelId>] [--thinking <level>]",
+					"error",
+				);
+				return;
+			}
+			agent = next;
+			i++;
+			continue;
+		}
+		if (a.startsWith("--agent=")) {
+			agent = a.slice("--agent=".length);
+			continue;
+		}
+
 		if (a === "--model") {
 			const next = rest[i + 1];
 			if (!next) {
-				ctx.ui.notify("Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]", "error");
+				ctx.ui.notify(
+					"Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--agent <agent>] [--model <provider>/<modelId>] [--thinking <level>]",
+					"error",
+				);
 				return;
 			}
 			model = next;
@@ -73,7 +95,10 @@ export async function handleTeamSpawnCommand(opts: {
 		if (a === "--thinking") {
 			const next = rest[i + 1];
 			if (!next) {
-				ctx.ui.notify("Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]", "error");
+				ctx.ui.notify(
+					"Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--agent <agent>] [--model <provider>/<modelId>] [--thinking <level>]",
+					"error",
+				);
 				return;
 			}
 			if (!isThinkingLevel(next)) {
@@ -105,13 +130,15 @@ export async function handleTeamSpawnCommand(opts: {
 
 	model = model?.trim();
 	if (model === "") model = undefined;
+	agent = agent?.trim();
+	if (agent === "") agent = undefined;
 
 	// Auto-pick a name when the current style allows it.
 	if (!nameRaw) {
 		const naming = getTeamsNamingRules(style);
 		if (naming.requireExplicitSpawnName) {
 			ctx.ui.notify(
-				"Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--model <provider>/<modelId>] [--thinking <level>]",
+				"Usage: /team spawn <name> [fresh|branch] [shared|worktree] [plan] [--agent <agent>] [--model <provider>/<modelId>] [--thinking <level>]",
 				"error",
 			);
 			return;
@@ -134,7 +161,7 @@ export async function handleTeamSpawnCommand(opts: {
 		nameRaw = picked;
 	}
 
-	const res = await spawnTeammate(ctx, { name: nameRaw, mode, workspaceMode, planRequired, model, thinking });
+	const res = await spawnTeammate(ctx, { name: nameRaw, mode, workspaceMode, planRequired, agent: agent?.trim() || undefined, model, thinking });
 	if (!res.ok) {
 		ctx.ui.notify(res.error, "error");
 		return;

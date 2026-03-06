@@ -10,6 +10,7 @@ import { createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask
 import { TeammateRpc } from "./teammate-rpc.js";
 import { ensureTeamConfig, loadTeamConfig, setMemberStatus, upsertMember, type TeamConfig } from "./team-config.js";
 import { getTeamDir } from "./paths.js";
+import { discoverTeamAgents } from "./agent-discovery.js";
 import { heartbeatTeamAttachClaim, releaseTeamAttachClaim } from "./team-attach-claim.js";
 import { ensureWorktreeCwd } from "./worktree.js";
 import { ActivityTracker, TranscriptTracker } from "./activity-tracker.js";
@@ -451,11 +452,23 @@ export function runLeader(pi: ExtensionAPI): void {
 			return { ok: false, error: `${formatMemberDisplayName(style, name)} already exists (${strings.teamNoun})` };
 		}
 
+		// Agent profile (optional)
+		const agentName = opts.agent?.trim();
+		const agentsRes = agentName ? await discoverTeamAgents(ctx) : null;
+		if (agentsRes) warnings.push(...agentsRes.warnings);
+		const agent = agentName ? agentsRes?.agents.find((a) => a.name === agentName) : undefined;
+		if (agentName && !agent) {
+			return {
+				ok: false,
+				error: `Unknown agent '${agentName}'. Use teams({action:"agent_list"}) or /team spawn ... --agent <name> after listing agents.`,
+			};
+		}
+
 		// Spawn-time model / thinking overrides (optional).
-		const thinkingLevel = opts.thinking ?? pi.getThinkingLevel();
+		const thinkingLevel = opts.thinking ?? agent?.thinking ?? pi.getThinkingLevel();
 
 		const modelResolution = resolveTeammateModelSelection({
-			modelOverride: opts.model,
+			modelOverride: opts.model ?? agent?.model,
 			leaderProvider: ctx.model?.provider,
 			leaderModelId: ctx.model?.id,
 		});
@@ -506,7 +519,8 @@ export function runLeader(pi: ExtensionAPI): void {
 		});
 
 		const builtInToolSet = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
-		const tools = (pi.getActiveTools() ?? []).filter((t) => builtInToolSet.has(t));
+		const baseTools = (pi.getActiveTools() ?? []).filter((t) => builtInToolSet.has(t));
+		const tools = (agent?.tools?.length ? agent.tools.filter((t) => builtInToolSet.has(t)) : baseTools).filter(Boolean);
 		const argsForChild: string[] = [];
 		if (sessionFile) argsForChild.push("--session", sessionFile);
 		argsForChild.push("--session-dir", teamSessionsDir);
@@ -527,6 +541,9 @@ export function runLeader(pi: ExtensionAPI): void {
 		const strings = getTeamsStrings(style);
 		const systemAppend = `You are ${strings.memberTitle.toLowerCase()} '${name}'. You collaborate with the ${strings.leaderTitle.toLowerCase()}. Prefer working from the shared task list.\n`;
 		argsForChild.push("--append-system-prompt", systemAppend);
+		if (agent && agent.systemPrompt.trim()) {
+			argsForChild.push("--append-system-prompt", agent.systemPrompt);
+		}
 
 		const autoClaim = (process.env.PI_TEAMS_DEFAULT_AUTO_CLAIM ?? "1") === "1";
 
@@ -550,6 +567,7 @@ export function runLeader(pi: ExtensionAPI): void {
 					PI_TEAMS_STYLE: style,
 					PI_TEAMS_AUTO_CLAIM: autoClaim ? "1" : "0",
 					...(opts.planRequired ? { PI_TEAMS_PLAN_REQUIRED: "1" } : {}),
+					...(agentName ? { PI_TEAMS_AGENT_PROFILE: agentName } : {}),
 				},
 				args: argsForChild,
 			});
@@ -592,6 +610,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				sessionName,
 				thinkingLevel,
 				...(childModel ? { model: childModel } : {}),
+				...(agentName ? { agent: agentName } : {}),
 			},
 		});
 

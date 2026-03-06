@@ -9,6 +9,8 @@ export interface SpawnTeammateOptions {
 	mode?: ContextMode;
 	workspaceMode?: WorkspaceMode;
 	planRequired?: boolean;
+	/** Optional agent profile name (from ~/.pi/agent/agents or <repo>/.pi/agents). */
+	agent?: string;
 	/**
 	 * Optional model override for the spawned teammate.
 	 *

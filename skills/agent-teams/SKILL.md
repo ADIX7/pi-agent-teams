@@ -51,6 +51,7 @@ Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations
 | `hooks_policy_set` | one or more: `hookFailureAction`, `hookMaxReopensPerTask`, `hookFollowupOwner` | Update team hooks policy at runtime (`hooksPolicyReset=true` clears team overrides first). |
 | `model_policy_get` | _(none)_ | Inspect teammate model policy and current leader inheritance behavior. |
 | `model_policy_check` | optional `model` | Validate a model override before spawn (`<provider>/<modelId>` or `<modelId>`). |
+| `agent_list` | _(none)_ | List available agent profiles (from `~/.pi/agent/agents` and optionally `<repo>/.pi/agents`). |
 
 Examples:
 
@@ -65,6 +66,7 @@ teams({ action: "hooks_policy_get" })
 teams({ action: "hooks_policy_set", hookFailureAction: "reopen_followup", hookMaxReopensPerTask: 2, hookFollowupOwner: "member" })
 teams({ action: "model_policy_get" })
 teams({ action: "model_policy_check", model: "openai-codex/gpt-5.1-codex-mini" })
+teams({ action: "agent_list" })
 ```
 
 This covers most day-to-day orchestration without slash commands. For nuanced/manual control, use `/team ...` commands directly.
@@ -73,9 +75,11 @@ For more control, use `/team spawn`:
 
 ```
 /team spawn alice              # default: fresh context, shared workspace
+/team spawn alice --agent reviewer  # spawn with agent profile
 /team spawn bob branch shared  # clone leader session context
 /team spawn carol fresh worktree  # git worktree isolation
 /team spawn dave plan          # plan-required mode (read-only until approved)
+/team spawn erin fresh --agent scout --model gpt-4o  # agent profile + explicit model override
 ```
 
 ## Task management
