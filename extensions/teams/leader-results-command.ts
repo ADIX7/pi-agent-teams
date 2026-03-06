@@ -8,7 +8,7 @@ type ParsedOptions = {
 	scope: Scope;
 	limit: number;
 	ids: Set<string> | null;
-	summary: boolean;
+	map: string | null;
 	model: { provider: string; id: string };
 };
 
@@ -19,7 +19,7 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 	let scope: Scope = "completed";
 	let limit = DEFAULT_LIMIT;
 	let ids: Set<string> | null = null;
-	let summary = false;
+	let map: string | null = null;
 	let model = { ...DEFAULT_SUMMARY_MODEL };
 
 	const positionals: string[] = [];
@@ -51,8 +51,22 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 			continue;
 		}
 
-		if (a === "--summary") {
-			summary = true;
+		if (a === "--map") {
+			const first = rest[i + 1];
+			if (!first) return { ok: false, error: "Missing value for --map" };
+			i += 1;
+			const quoteChar = first[0];
+			if (quoteChar === '"' || quoteChar === "'" || quoteChar === "`") {
+				const parts: string[] = [first];
+				while (!parts[parts.length - 1]!.endsWith(quoteChar) || (parts.length === 1 && first.length === 1)) {
+					i += 1;
+					if (i >= rest.length) return { ok: false, error: `Unterminated ${quoteChar} in --map value` };
+					parts.push(rest[i]!);
+				}
+				map = parts.join(" ").slice(1, -1);
+			} else {
+				map = first;
+			}
 			continue;
 		}
 
@@ -80,7 +94,7 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 		else return { ok: false, error: `Invalid scope: ${s}` };
 	}
 
-	return { ok: true, opts: { scope, limit, ids, summary, model } };
+	return { ok: true, opts: { scope, limit, ids, map, model } };
 }
 
 function taskHasResult(t: TeamTask): boolean {
@@ -94,12 +108,13 @@ function byNumericIdAsc(a: TeamTask, b: TeamTask): number {
 	return a.id.localeCompare(b.id, undefined, { numeric: true });
 }
 
-async function summarizeResults(opts: {
+async function mapResults(opts: {
 	tasks: TeamTask[];
+	userPrompt: string;
 	model: { provider: string; id: string };
 	cwd: string;
-}): Promise<{ summaries: Map<string, string> | null; error?: string }> {
-	const { tasks, model, cwd } = opts;
+}): Promise<{ mappedResults: Map<string, string> | null; error?: string }> {
+	const { tasks, userPrompt, model, cwd } = opts;
 
 	const input = tasks.map((t) => ({
 		id: t.id,
@@ -108,12 +123,12 @@ async function summarizeResults(opts: {
 	}));
 
 	const prompt =
-		"You summarize task results. For each task, produce a 1-3 line summary. " +
+		`Process each task result according to this instruction: ${userPrompt}\n` +
 		"You MUST return valid JSON only (no markdown), exactly one entry per input task id. " +
-		"Output: an array of objects: {\"id\": string, \"summary\": string}.\n\n" +
+		"Output: an array of objects: {\"id\": string, \"result\": string}.\n\n" +
 		JSON.stringify(input);
 
-	const t = new TeammateRpc("summary-worker");
+	const t = new TeammateRpc("map-worker");
 	try {
 		await t.start({
 			cwd,
@@ -139,33 +154,33 @@ async function summarizeResults(opts: {
 		try {
 			parsed = JSON.parse(raw) as unknown;
 		} catch {
-			return { summaries: null, error: "Summarization failed: returned non-JSON. Showing full results." };
+			return { mappedResults: null, error: "Map failed: returned non-JSON. Showing full results." };
 		}
 
 		if (!Array.isArray(parsed)) {
-			return { summaries: null, error: "Summarization failed: invalid JSON shape. Showing full results." };
+			return { mappedResults: null, error: "Map failed: invalid JSON shape. Showing full results." };
 		}
 
 		const out = new Map<string, string>();
 		for (const item of parsed as unknown[]) {
 			if (!item || typeof item !== "object") continue;
-			const maybe = item as { id?: unknown; summary?: unknown };
-			if (typeof maybe.id !== "string" || typeof maybe.summary !== "string") continue;
-			out.set(maybe.id, maybe.summary.trim());
+			const maybe = item as { id?: unknown; result?: unknown };
+			if (typeof maybe.id !== "string" || typeof maybe.result !== "string") continue;
+			out.set(maybe.id, maybe.result.trim());
 		}
 
 		const missing = tasks.filter((t) => !out.has(t.id)).map((t) => t.id);
 		if (missing.length) {
 			return {
-				summaries: null,
-				error: `Summarization failed: missing ids ${missing.join(", ")}. Showing full results.`,
+				mappedResults: null,
+				error: `Map failed: missing ids ${missing.join(", ")}. Showing full results.`,
 			};
 		}
 
-		return { summaries: out };
+		return { mappedResults: out };
 	} catch (e: unknown) {
 		const em = e instanceof Error ? e.message : String(e);
-		return { summaries: null, error: `Summarization failed: ${em}. Showing full results.` };
+		return { mappedResults: null, error: `Map failed: ${em}. Showing full results.` };
 	} finally {
 		await t.stop();
 	}
@@ -186,7 +201,7 @@ export async function handleTeamResultsCommand(opts: {
 	const parsed = parseArgs(rest);
 	if (!parsed.ok) {
 		ctx.ui.notify(
-			"Usage: /team results [completed|all] [--limit N] [--ids 1,2,3] [--summary] [--model <provider>/<modelId>]\n" +
+			"Usage: /team results [completed|all] [--limit N] [--ids 1,2,3] [--map <prompt>] [--model <provider>/<modelId>]\n" +
 				parsed.error,
 			"error",
 		);
@@ -214,18 +229,18 @@ export async function handleTeamResultsCommand(opts: {
 		return;
 	}
 
-	let summaries: Map<string, string> | null = null;
-	let summaryError: string | null = null;
-	if (parsed.opts.summary) {
-		const res = await summarizeResults({ tasks: selected, model: parsed.opts.model, cwd: ctx.cwd });
-		summaries = res.summaries;
-		summaryError = res.error ?? null;
+	let mappedResults: Map<string, string> | null = null;
+	let mapError: string | null = null;
+	if (parsed.opts.map) {
+		const res = await mapResults({ tasks: selected, userPrompt: parsed.opts.map, model: parsed.opts.model, cwd: ctx.cwd });
+		mappedResults = res.mappedResults;
+		mapError = res.error ?? null;
 	}
 
 	const blocks: string[] = [];
 	blocks.push(
 		`Results (${selected.length}) — scope=${parsed.opts.scope} — taskListId=${effectiveTlId}` +
-			(parsed.opts.summary ? ` — summaryModel=${parsed.opts.model.provider}/${parsed.opts.model.id}` : ""),
+			(parsed.opts.map ? ` — mapModel=${parsed.opts.model.provider}/${parsed.opts.model.id}` : ""),
 	);
 	blocks.push("");
 
@@ -234,9 +249,9 @@ export async function handleTeamResultsCommand(opts: {
 		blocks.push(`status: ${t.status}${t.owner ? ` • owner: ${t.owner}` : ""}`);
 		blocks.push("");
 
-		if (summaries) {
-			blocks.push("summary:");
-			blocks.push(String(summaries.get(t.id) ?? "").trimEnd());
+		if (mappedResults) {
+			blocks.push("mapped:");
+			blocks.push(String(mappedResults.get(t.id) ?? "").trimEnd());
 		} else {
 			blocks.push("result:");
 			blocks.push(String(t.metadata?.result ?? "").trimEnd());
@@ -266,5 +281,5 @@ export async function handleTeamResultsCommand(opts: {
 	}
 	flush();
 
-	if (summaryError) ctx.ui.notify(summaryError, "error");
+	if (mapError) ctx.ui.notify(mapError, "error");
 }
