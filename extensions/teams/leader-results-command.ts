@@ -1,6 +1,5 @@
-import { AuthStorage, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { completeSimple, getModels } from "@mariozechner/pi-ai";
-import type { AssistantMessage, TextContent, KnownProvider, Model, Api } from "@mariozechner/pi-ai";
+import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { TeammateRpc } from "./teammate-rpc.js";
 import type { TeamTask } from "./task-store.js";
 
 type Scope = "completed" | "all";
@@ -95,58 +94,12 @@ function byNumericIdAsc(a: TeamTask, b: TeamTask): number {
 	return a.id.localeCompare(b.id, undefined, { numeric: true });
 }
 
-function assistantText(msg: AssistantMessage): string {
-	return (msg.content ?? [])
-		.filter((c): c is TextContent => c.type === "text")
-		.map((c) => c.text)
-		.join("");
-}
-
-const KNOWN_PROVIDERS: KnownProvider[] = [
-	"amazon-bedrock",
-	"anthropic",
-	"google",
-	"google-gemini-cli",
-	"google-antigravity",
-	"google-vertex",
-	"openai",
-	"azure-openai-responses",
-	"openai-codex",
-	"github-copilot",
-	"xai",
-	"groq",
-	"cerebras",
-	"openrouter",
-	"vercel-ai-gateway",
-	"zai",
-	"mistral",
-	"minimax",
-	"minimax-cn",
-	"huggingface",
-	"opencode",
-	"kimi-coding",
-];
-
-function isKnownProvider(v: string): v is KnownProvider {
-	return (KNOWN_PROVIDERS as readonly string[]).includes(v);
-}
-
-function resolveModel(spec: { provider: string; id: string }): Model<Api> | null {
-	if (!isKnownProvider(spec.provider)) return null;
-	const ms = getModels(spec.provider);
-	return (ms.find((m) => m.id === spec.id) as Model<Api> | undefined) ?? null;
-}
-
 async function summarizeResults(opts: {
 	tasks: TeamTask[];
 	model: { provider: string; id: string };
+	cwd: string;
 }): Promise<{ summaries: Map<string, string> | null; error?: string }> {
-	const { tasks, model } = opts;
-
-	const m = resolveModel(model);
-	if (!m) {
-		return { summaries: null, error: `Summarization failed: unknown model ${model.provider}/${model.id}. Showing full results.` };
-	}
+	const { tasks, model, cwd } = opts;
 
 	const input = tasks.map((t) => ({
 		id: t.id,
@@ -154,65 +107,68 @@ async function summarizeResults(opts: {
 		result: String(t.metadata?.result ?? ""),
 	}));
 
-	const systemPrompt =
+	const prompt =
 		"You summarize task results. For each task, produce a 1-3 line summary. " +
 		"You MUST return valid JSON only (no markdown), exactly one entry per input task id. " +
-		"Output: an array of objects: {\"id\": string, \"summary\": string}.";
+		"Output: an array of objects: {\"id\": string, \"summary\": string}.\n\n" +
+		JSON.stringify(input);
 
-	const authStorage = new AuthStorage();
-	const apiKey = await authStorage.getApiKey(model.provider);
-	if (!apiKey) {
-		return {
-			summaries: null,
-			error: `Summarization failed: no credentials for provider ${model.provider} (try /login). Showing full results.`,
-		};
-	}
-
-	let msg: AssistantMessage;
+	const t = new TeammateRpc("summary-worker");
 	try {
-		msg = await completeSimple(
-			m,
-			{
-				systemPrompt,
-				messages: [{ role: "user", content: JSON.stringify(input), timestamp: Date.now() }],
-			},
-			{ maxTokens: 2000, temperature: 0.2, apiKey },
-		);
+		await t.start({
+			cwd,
+			env: {},
+			args: ["--model", `${model.provider}/${model.id}`, "--no-extensions"],
+		});
+
+		const done = new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => reject(new Error("Summarization timed out")), 60_000);
+			t.onEvent((ev) => {
+				if (ev.type === "agent_end") {
+					clearTimeout(timeout);
+					resolve();
+				}
+			});
+		});
+
+		await t.prompt(prompt);
+		await done;
+
+		const raw = t.lastAssistantText.trim();
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw) as unknown;
+		} catch {
+			return { summaries: null, error: "Summarization failed: returned non-JSON. Showing full results." };
+		}
+
+		if (!Array.isArray(parsed)) {
+			return { summaries: null, error: "Summarization failed: invalid JSON shape. Showing full results." };
+		}
+
+		const out = new Map<string, string>();
+		for (const item of parsed as unknown[]) {
+			if (!item || typeof item !== "object") continue;
+			const maybe = item as { id?: unknown; summary?: unknown };
+			if (typeof maybe.id !== "string" || typeof maybe.summary !== "string") continue;
+			out.set(maybe.id, maybe.summary.trim());
+		}
+
+		const missing = tasks.filter((t) => !out.has(t.id)).map((t) => t.id);
+		if (missing.length) {
+			return {
+				summaries: null,
+				error: `Summarization failed: missing ids ${missing.join(", ")}. Showing full results.`,
+			};
+		}
+
+		return { summaries: out };
 	} catch (e: unknown) {
 		const em = e instanceof Error ? e.message : String(e);
 		return { summaries: null, error: `Summarization failed: ${em}. Showing full results.` };
+	} finally {
+		await t.stop();
 	}
-
-	const raw = assistantText(msg).trim();
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw) as unknown;
-	} catch {
-		return { summaries: null, error: "Summarization failed: returned non-JSON. Showing full results." };
-	}
-
-	if (!Array.isArray(parsed)) {
-		return { summaries: null, error: "Summarization failed: invalid JSON shape. Showing full results." };
-	}
-
-	const out = new Map<string, string>();
-	for (const item of parsed as unknown[]) {
-		if (!item || typeof item !== "object") continue;
-		const maybe = item as { id?: unknown; summary?: unknown };
-		if (typeof maybe.id !== "string" || typeof maybe.summary !== "string") continue;
-		out.set(maybe.id, maybe.summary.trim());
-	}
-
-	// ensure coverage
-	const missing = tasks.filter((t) => !out.has(t.id)).map((t) => t.id);
-	if (missing.length) {
-		return {
-			summaries: null,
-			error: `Summarization failed: missing ids ${missing.join(", ")}. Showing full results.`,
-		};
-	}
-
-	return { summaries: out };
 }
 
 export async function handleTeamResultsCommand(opts: {
@@ -261,7 +217,7 @@ export async function handleTeamResultsCommand(opts: {
 	let summaries: Map<string, string> | null = null;
 	let summaryError: string | null = null;
 	if (parsed.opts.summary) {
-		const res = await summarizeResults({ tasks: selected, model: parsed.opts.model });
+		const res = await summarizeResults({ tasks: selected, model: parsed.opts.model, cwd: ctx.cwd });
 		summaries = res.summaries;
 		summaryError = res.error ?? null;
 	}
