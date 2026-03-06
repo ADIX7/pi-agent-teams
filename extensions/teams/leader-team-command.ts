@@ -57,7 +57,7 @@ const TEAM_HELP_TEXT = [
 	"  /team plan reject <name> [feedback...]",
 	"  /team cleanup [--force]",
 	"  /team prune [--all]  # hide stale manual teammates (mark offline)",
-	"  /team results [completed|all] [--limit N] [--ids 1,2,3] [--map <prompt>] [--model <provider>/<modelId>]", 
+	"  /team results [completed|all] [--limit N] [--ids 1,2,3] [-m|--map <prompt>] [--model <provider>/<modelId>]", 
 	"  /team task add <text...>",
 	"  /team task assign <id> <agent>",
 	"  /team task unassign <id>",

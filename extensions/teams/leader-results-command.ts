@@ -51,7 +51,7 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 			continue;
 		}
 
-		if (a === "--map") {
+		if (a === "--map" || a === "-m") {
 			const first = rest[i + 1];
 			if (!first) return { ok: false, error: "Missing value for --map" };
 			i += 1;
@@ -113,7 +113,7 @@ async function mapResults(opts: {
 	userPrompt: string;
 	model: { provider: string; id: string };
 	cwd: string;
-}): Promise<{ mappedResults: Map<string, string> | null; error?: string }> {
+}): Promise<{ mappedResults: Map<string, string> | null; rawFallback?: string; error?: string }> {
 	const { tasks, userPrompt, model, cwd } = opts;
 
 	const input = tasks.map((t) => ({
@@ -124,8 +124,10 @@ async function mapResults(opts: {
 
 	const prompt =
 		`Process each task result according to this instruction: ${userPrompt}\n` +
-		"You MUST return valid JSON only (no markdown), exactly one entry per input task id. " +
-		"Output: an array of objects: {\"id\": string, \"result\": string}.\n\n" +
+		"CRITICAL: Return valid JSON ONLY (no markdown, no code fences). " +
+		"All double quotes inside string values MUST be escaped as \\\". " +
+		"Output exactly one entry per input task id as an array of objects: " +
+		"[{\"id\": string, \"result\": string}].\n\n" +
 		JSON.stringify(input);
 
 	const t = new TeammateRpc("map-worker");
@@ -133,7 +135,7 @@ async function mapResults(opts: {
 		await t.start({
 			cwd,
 			env: {},
-			args: ["--model", `${model.provider}/${model.id}`, "--no-extensions"],
+			args: ["--model", `${model.provider}/${model.id}`, "--no-extensions", "--no-session"],
 		});
 
 		const done = new Promise<void>((resolve, reject) => {
@@ -154,11 +156,11 @@ async function mapResults(opts: {
 		try {
 			parsed = JSON.parse(raw) as unknown;
 		} catch {
-			return { mappedResults: null, error: "Map failed: returned non-JSON. Showing full results." };
+			return { mappedResults: null, rawFallback: raw, error: "Map returned non-JSON, showing raw output." };
 		}
 
 		if (!Array.isArray(parsed)) {
-			return { mappedResults: null, error: "Map failed: invalid JSON shape. Showing full results." };
+			return { mappedResults: null, rawFallback: raw, error: "Map returned invalid JSON shape, showing raw output." };
 		}
 
 		const out = new Map<string, string>();
@@ -173,7 +175,8 @@ async function mapResults(opts: {
 		if (missing.length) {
 			return {
 				mappedResults: null,
-				error: `Map failed: missing ids ${missing.join(", ")}. Showing full results.`,
+				rawFallback: raw,
+				error: `Map returned incomplete results (missing ids ${missing.join(", ")}), showing raw output.`,
 			};
 		}
 
@@ -232,9 +235,15 @@ export async function handleTeamResultsCommand(opts: {
 	let mappedResults: Map<string, string> | null = null;
 	let mapError: string | null = null;
 	if (parsed.opts.map) {
+		ctx.ui.notify("Mapping results…", "info");
 		const res = await mapResults({ tasks: selected, userPrompt: parsed.opts.map, model: parsed.opts.model, cwd: ctx.cwd });
 		mappedResults = res.mappedResults;
 		mapError = res.error ?? null;
+		if (res.rawFallback) {
+			ctx.ui.notify(mapError ?? "", "error");
+			ctx.ui.notify(res.rawFallback, "info");
+			return;
+		}
 	}
 
 	const blocks: string[] = [];
