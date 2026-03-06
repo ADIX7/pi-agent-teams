@@ -138,16 +138,14 @@ function resolveModel(spec: { provider: string; id: string }): Model<Api> | null
 }
 
 async function summarizeResults(opts: {
-	ctx: ExtensionCommandContext;
 	tasks: TeamTask[];
 	model: { provider: string; id: string };
-}): Promise<Map<string, string> | null> {
-	const { ctx, tasks, model } = opts;
+}): Promise<{ summaries: Map<string, string> | null; error?: string }> {
+	const { tasks, model } = opts;
 
 	const m = resolveModel(model);
 	if (!m) {
-		ctx.ui.notify(`Unknown model: ${model.provider}/${model.id}`, "error");
-		return null;
+		return { summaries: null, error: `Summarization failed: unknown model ${model.provider}/${model.id}. Showing full results.` };
 	}
 
 	const input = tasks.map((t) => ({
@@ -164,8 +162,10 @@ async function summarizeResults(opts: {
 	const authStorage = new AuthStorage();
 	const apiKey = await authStorage.getApiKey(model.provider);
 	if (!apiKey) {
-		ctx.ui.notify(`No credentials for provider: ${model.provider} (try /login)`, "error");
-		return null;
+		return {
+			summaries: null,
+			error: `Summarization failed: no credentials for provider ${model.provider} (try /login). Showing full results.`,
+		};
 	}
 
 	let msg: AssistantMessage;
@@ -180,8 +180,7 @@ async function summarizeResults(opts: {
 		);
 	} catch (e: unknown) {
 		const em = e instanceof Error ? e.message : String(e);
-		ctx.ui.notify(`Summarization failed: ${em}`, "error");
-		return null;
+		return { summaries: null, error: `Summarization failed: ${em}. Showing full results.` };
 	}
 
 	const raw = assistantText(msg).trim();
@@ -189,13 +188,11 @@ async function summarizeResults(opts: {
 	try {
 		parsed = JSON.parse(raw) as unknown;
 	} catch {
-		ctx.ui.notify(`Summarization returned non-JSON. Showing full results.`, "error");
-		return null;
+		return { summaries: null, error: "Summarization failed: returned non-JSON. Showing full results." };
 	}
 
 	if (!Array.isArray(parsed)) {
-		ctx.ui.notify(`Summarization returned invalid JSON shape. Showing full results.`, "error");
-		return null;
+		return { summaries: null, error: "Summarization failed: invalid JSON shape. Showing full results." };
 	}
 
 	const out = new Map<string, string>();
@@ -209,11 +206,13 @@ async function summarizeResults(opts: {
 	// ensure coverage
 	const missing = tasks.filter((t) => !out.has(t.id)).map((t) => t.id);
 	if (missing.length) {
-		ctx.ui.notify(`Summarization missing ids: ${missing.join(", ")}. Showing full results.`, "error");
-		return null;
+		return {
+			summaries: null,
+			error: `Summarization failed: missing ids ${missing.join(", ")}. Showing full results.`,
+		};
 	}
 
-	return out;
+	return { summaries: out };
 }
 
 export async function handleTeamResultsCommand(opts: {
@@ -260,8 +259,11 @@ export async function handleTeamResultsCommand(opts: {
 	}
 
 	let summaries: Map<string, string> | null = null;
+	let summaryError: string | null = null;
 	if (parsed.opts.summary) {
-		summaries = await summarizeResults({ ctx, tasks: selected, model: parsed.opts.model });
+		const res = await summarizeResults({ tasks: selected, model: parsed.opts.model });
+		summaries = res.summaries;
+		summaryError = res.error ?? null;
 	}
 
 	const blocks: string[] = [];
@@ -307,4 +309,6 @@ export async function handleTeamResultsCommand(opts: {
 		curLen += addLen;
 	}
 	flush();
+
+	if (summaryError) ctx.ui.notify(summaryError, "error");
 }
