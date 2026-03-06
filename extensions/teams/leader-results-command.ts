@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { AuthStorage, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { completeSimple, getModels } from "@mariozechner/pi-ai";
 import type { AssistantMessage, TextContent, KnownProvider, Model, Api } from "@mariozechner/pi-ai";
 import type { TeamTask } from "./task-store.js";
@@ -14,7 +14,7 @@ type ParsedOptions = {
 };
 
 const DEFAULT_LIMIT = 50;
-const DEFAULT_SUMMARY_MODEL = { provider: "github-copilot", id: "claude-haiku-4.5" };
+const DEFAULT_SUMMARY_MODEL = { provider: "github-copilot", id: "gpt-4o" };
 
 function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: false; error: string } {
 	let scope: Scope = "completed";
@@ -161,21 +161,26 @@ async function summarizeResults(opts: {
 		"You MUST return valid JSON only (no markdown), exactly one entry per input task id. " +
 		"Output: an array of objects: {\"id\": string, \"summary\": string}.";
 
+	const authStorage = new AuthStorage();
+	const apiKey = await authStorage.getApiKey(model.provider);
+	if (!apiKey) {
+		ctx.ui.notify(`No credentials for provider: ${model.provider} (try /login)`, "error");
+		return null;
+	}
+
 	let msg: AssistantMessage;
 	try {
 		msg = await completeSimple(
 			m,
 			{
 				systemPrompt,
-				messages: [
-					{ role: "user", content: JSON.stringify(input), timestamp: Date.now() },
-				],
+				messages: [{ role: "user", content: JSON.stringify(input), timestamp: Date.now() }],
 			},
-			{ maxTokens: 2000, temperature: 0.2 },
+			{ maxTokens: 2000, temperature: 0.2, apiKey },
 		);
 	} catch (e: unknown) {
-		const msg = e instanceof Error ? e.message : String(e);
-		ctx.ui.notify(`Summarization failed: ${msg}`, "error");
+		const em = e instanceof Error ? e.message : String(e);
+		ctx.ui.notify(`Summarization failed: ${em}`, "error");
 		return null;
 	}
 
