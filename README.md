@@ -238,6 +238,7 @@ Model inheritance note:
 | `/team task unassign <id>` | Remove assignment |
 | `/team task list` | Show tasks with status, deps, blocks |
 | `/team task show <id>` | Full description + result |
+| `/team results [completed\|all] [--limit N] [--ids 1,2,3]` | Show last 50 task results (or selected ids) |
 | `/team task dep add <id> <depId>` | Add a dependency |
 | `/team task dep rm <id> <depId>` | Remove a dependency |
 | `/team task dep ls <id>` | Show deps and blocks |

@@ -24,6 +24,7 @@ import {
 import { handleTeamPlanCommand } from "./leader-plan-commands.js";
 import { handleTeamSpawnCommand } from "./leader-spawn-command.js";
 import { handleTeamTaskCommand } from "./leader-task-commands.js";
+import { handleTeamResultsCommand } from "./leader-results-command.js";
 import type { SpawnTeammateFn } from "./spawn-types.js";
 import type { TeamConfig } from "./team-config.js";
 import type { TeamTask } from "./task-store.js";
@@ -56,6 +57,7 @@ const TEAM_HELP_TEXT = [
 	"  /team plan reject <name> [feedback...]",
 	"  /team cleanup [--force]",
 	"  /team prune [--all]  # hide stale manual teammates (mark offline)",
+	"  /team results [completed|all] [--limit N] [--ids 1,2,3]",
 	"  /team task add <text...>",
 	"  /team task assign <id> <agent>",
 	"  /team task unassign <id>",
@@ -357,6 +359,17 @@ export async function handleTeamCommand(opts: {
 				getTasks,
 				refreshTasks,
 				renderWidget,
+			});
+		},
+
+		results: async () => {
+			await handleTeamResultsCommand({
+				ctx,
+				rest,
+				teamId: activeTeamId,
+				getTaskListId,
+				refreshTasks,
+				getTasks,
 			});
 		},
 
