@@ -57,7 +57,7 @@ const TEAM_HELP_TEXT = [
 	"  /team plan reject <name> [feedback...]",
 	"  /team cleanup [--force]",
 	"  /team prune [--all]  # hide stale manual teammates (mark offline)",
-	"  /team results [completed|all] [--limit N] [--ids 1,2,3] [-m|--map <prompt>] [--model <provider>/<modelId>]", 
+	"  /team results [completed|all] [--limit N] [--ids 1,2,3] [-m|--map <prompt>] [--ctx] [--model <provider>/<modelId>]", 
 	"  /team task add <text...>",
 	"  /team task assign <id> <agent>",
 	"  /team task unassign <id>",
@@ -95,6 +95,7 @@ export async function handleTeamCommand(opts: {
 	openWidget: (ctx: ExtensionCommandContext) => Promise<void>;
 	getTeamsExtensionEntryPath: () => string | null;
 	shellQuote: (v: string) => string;
+	sendToContext?: (text: string) => void;
 	getCurrentCtx: () => ExtensionContext | null;
 	stopAllTeammates: (ctx: ExtensionContext, reason: string) => Promise<void>;
 }): Promise<void> {
@@ -119,6 +120,7 @@ export async function handleTeamCommand(opts: {
 		openWidget,
 		getTeamsExtensionEntryPath,
 		shellQuote,
+		sendToContext,
 		getCurrentCtx,
 		stopAllTeammates,
 	} = opts;
@@ -370,6 +372,7 @@ export async function handleTeamCommand(opts: {
 				getTaskListId,
 				refreshTasks,
 				getTasks,
+				sendToContext,
 			});
 		},
 

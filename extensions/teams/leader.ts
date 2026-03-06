@@ -936,6 +936,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				openWidget,
 				getTeamsExtensionEntryPath,
 				shellQuote,
+				sendToContext: (text) => pi.sendUserMessage(text),
 				getCurrentCtx: () => currentCtx,
 				stopAllTeammates,
 			});

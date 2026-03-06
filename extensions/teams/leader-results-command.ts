@@ -9,6 +9,7 @@ type ParsedOptions = {
 	limit: number;
 	ids: Set<string> | null;
 	map: string | null;
+	injectCtx: boolean;
 	model: { provider: string; id: string };
 };
 
@@ -20,6 +21,7 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 	let limit = DEFAULT_LIMIT;
 	let ids: Set<string> | null = null;
 	let map: string | null = null;
+	let injectCtx = false;
 	let model = { ...DEFAULT_SUMMARY_MODEL };
 
 	const positionals: string[] = [];
@@ -70,6 +72,11 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 			continue;
 		}
 
+		if (a === "--ctx") {
+			injectCtx = true;
+			continue;
+		}
+
 		if (a === "--model") {
 			const v = rest[i + 1];
 			if (!v) return { ok: false, error: "Missing value for --model" };
@@ -94,7 +101,7 @@ function parseArgs(rest: string[]): { ok: true; opts: ParsedOptions } | { ok: fa
 		else return { ok: false, error: `Invalid scope: ${s}` };
 	}
 
-	return { ok: true, opts: { scope, limit, ids, map, model } };
+	return { ok: true, opts: { scope, limit, ids, map, injectCtx, model } };
 }
 
 function taskHasResult(t: TeamTask): boolean {
@@ -196,15 +203,16 @@ export async function handleTeamResultsCommand(opts: {
 	getTaskListId: () => string | null;
 	refreshTasks: () => Promise<void>;
 	getTasks: () => TeamTask[];
+	sendToContext?: (text: string) => void;
 }): Promise<void> {
-	const { ctx, rest, teamId, getTaskListId, refreshTasks, getTasks } = opts;
+	const { ctx, rest, teamId, getTaskListId, refreshTasks, getTasks, sendToContext } = opts;
 
 	const effectiveTlId = getTaskListId() ?? teamId;
 
 	const parsed = parseArgs(rest);
 	if (!parsed.ok) {
 		ctx.ui.notify(
-			"Usage: /team results [completed|all] [--limit N] [--ids 1,2,3] [--map <prompt>] [--model <provider>/<modelId>]\n" +
+			"Usage: /team results [completed|all] [--limit N] [--ids 1,2,3] [-m|--map <prompt>] [--ctx] [--model <provider>/<modelId>]\n" +
 				parsed.error,
 			"error",
 		);
@@ -242,6 +250,7 @@ export async function handleTeamResultsCommand(opts: {
 		if (res.rawFallback) {
 			ctx.ui.notify(mapError ?? "", "error");
 			ctx.ui.notify(res.rawFallback, "info");
+			if (parsed.opts.injectCtx && sendToContext) sendToContext(res.rawFallback);
 			return;
 		}
 	}
@@ -269,6 +278,11 @@ export async function handleTeamResultsCommand(opts: {
 		blocks.push("");
 		blocks.push("---");
 		blocks.push("");
+	}
+
+	// Inject into context if --ctx flag is set
+	if (parsed.opts.injectCtx && sendToContext) {
+		sendToContext(blocks.join("\n"));
 	}
 
 	// Chunk notify output (avoid giant single notify)
